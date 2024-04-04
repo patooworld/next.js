@@ -157,5 +157,176 @@ createNextDescribe(
         expect(await browser.elementById('params').text()).toBe('foobar')
       })
     })
+
+    describe.each([
+      { basePath: '/refreshing', label: 'regular' },
+      { basePath: '/dynamic-refresh/foo', label: 'dynamic' },
+    ])('router.refresh ($label)', ({ basePath }) => {
+      it('should correctly refresh data for the intercepted route and previously active page slot', async () => {
+        const browser = await next.browser(basePath)
+        let initialRandomNumber = await browser.elementById('random-number')
+
+        await browser.elementByCss(`[href='${basePath}/login']`).click()
+
+        // interception modal should be visible
+        let initialModalRandomNumber = await browser
+          .elementById('modal-random')
+          .text()
+
+        // trigger a refresh
+        await browser.elementById('refresh-button').click()
+
+        await retry(async () => {
+          const newRandomNumber = await browser
+            .elementById('random-number')
+            .text()
+          const newModalRandomNumber = await browser
+            .elementById('modal-random')
+            .text()
+          expect(initialRandomNumber).not.toBe(newRandomNumber)
+          expect(initialModalRandomNumber).not.toBe(newModalRandomNumber)
+
+          // reset the initial values to be the new values, so that we can verify the revalidate case below.
+          initialRandomNumber = newRandomNumber
+          initialModalRandomNumber = newModalRandomNumber
+        })
+
+        // trigger a revalidate
+        await browser.elementById('revalidate-button').click()
+
+        await retry(async () => {
+          const newRandomNumber = await browser
+            .elementById('random-number')
+            .text()
+          const newModalRandomNumber = await browser
+            .elementById('modal-random')
+            .text()
+          expect(initialRandomNumber).not.toBe(newRandomNumber)
+          expect(initialModalRandomNumber).not.toBe(newModalRandomNumber)
+        })
+
+        // reload the page, triggering which will remove the interception route and show the full page
+        await browser.refresh()
+
+        const initialLoginPageRandomNumber = await browser
+          .elementById('login-page-random')
+          .text()
+
+        // trigger a refresh
+        await browser.elementById('refresh-button').click()
+
+        await retry(async () => {
+          const newLoginPageRandomNumber = await browser
+            .elementById('login-page-random')
+            .text()
+
+          expect(newLoginPageRandomNumber).not.toBe(
+            initialLoginPageRandomNumber
+          )
+        })
+      })
+
+      it('should correctly refresh data for previously intercepted modal and active page slot', async () => {
+        const browser = await next.browser(basePath)
+
+        await browser.elementByCss(`[href='${basePath}/login']`).click()
+
+        // interception modal should be visible
+        let initialModalRandomNumber = await browser
+          .elementById('modal-random')
+          .text()
+
+        await browser.elementByCss(`[href='${basePath}/other']`).click()
+        // data for the /other page should be visible
+
+        let initialOtherPageRandomNumber = await browser
+          .elementById('other-page-random')
+          .text()
+
+        // trigger a refresh
+        await browser.elementById('refresh-button').click()
+
+        await retry(async () => {
+          const newModalRandomNumber = await browser
+            .elementById('modal-random')
+            .text()
+
+          const newOtherPageRandomNumber = await browser
+            .elementById('other-page-random')
+            .text()
+          expect(initialModalRandomNumber).not.toBe(newModalRandomNumber)
+          expect(initialOtherPageRandomNumber).not.toBe(
+            newOtherPageRandomNumber
+          )
+          // reset the initial values to be the new values, so that we can verify the revalidate case below.
+          initialOtherPageRandomNumber = newOtherPageRandomNumber
+          initialModalRandomNumber = newModalRandomNumber
+        })
+
+        // trigger a revalidate
+        await browser.elementById('revalidate-button').click()
+
+        await retry(async () => {
+          const newModalRandomNumber = await browser
+            .elementById('modal-random')
+            .text()
+
+          const newOtherPageRandomNumber = await browser
+            .elementById('other-page-random')
+            .text()
+          expect(initialModalRandomNumber).not.toBe(newModalRandomNumber)
+          expect(initialOtherPageRandomNumber).not.toBe(
+            newOtherPageRandomNumber
+          )
+        })
+      })
+    })
+
+    describe('server action revalidation', () => {
+      it('handles refreshing when multiple parallel slots are active', async () => {
+        const browser = await next.browser('/nested-revalidate')
+
+        const currentPageTime = await browser.elementById('page-now').text()
+
+        expect(await browser.hasElementByCssSelector('#modal')).toBe(false)
+        expect(await browser.hasElementByCssSelector('#drawer')).toBe(false)
+
+        // renders the drawer parallel slot
+        await browser.elementByCss("[href='/nested-revalidate/drawer']").click()
+        await browser.waitForElementByCss('#drawer')
+
+        // renders the modal slot
+        await browser.elementByCss("[href='/nested-revalidate/modal']").click()
+        await browser.waitForElementByCss('#modal')
+
+        // Both should be visible, despite only one "matching"
+        expect(await browser.hasElementByCssSelector('#modal')).toBe(true)
+        expect(await browser.hasElementByCssSelector('#drawer')).toBe(true)
+
+        // grab the current time of the drawer
+        const currentDrawerTime = await browser.elementById('drawer-now').text()
+
+        // trigger the revalidation action in the modal.
+        await browser.elementById('modal-submit-button').click()
+
+        await retry(async () => {
+          // Revalidation should close the modal
+          expect(await browser.hasElementByCssSelector('#modal')).toBe(false)
+
+          // But the drawer should still be open
+          expect(await browser.hasElementByCssSelector('#drawer')).toBe(true)
+
+          // And the drawer should have a new time
+          expect(await browser.elementById('drawer-now').text()).not.toEqual(
+            currentDrawerTime
+          )
+
+          // And the underlying page should have a new time
+          expect(await browser.elementById('page-now').text()).not.toEqual(
+            currentPageTime
+          )
+        })
+      })
+    })
   }
 )
