@@ -25,7 +25,7 @@
     "@storybook/nextjs": "~7.6.8",
     "@storybook/react": "~ 7.6.8",
     "@storybook/testing-library": "^0.0.14-next.2",
-    "storybook": "~7.6.8"
+    "storybook": "~8.1.5"
   },
   "engines": {
     "node": ">=16"
