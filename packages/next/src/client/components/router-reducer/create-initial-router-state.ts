@@ -49,7 +49,15 @@ export function createInitialRouterState({
     loading: initialSeedData[3],
   }
 
-  addRefreshMarkerToActiveParallelSegments(initialTree, initialCanonicalUrl)
+  const canonicalUrl =
+    // location.href is read as the initial value for canonicalUrl in the browser
+    // This is safe to do as canonicalUrl can't be rendered, it's only used to control the history updates in the useEffect further down in this file.
+    location
+      ? // window.location does not have the same type as URL but has all the fields createHrefFromUrl needs.
+        createHrefFromUrl(location)
+      : initialCanonicalUrl
+
+  addRefreshMarkerToActiveParallelSegments(initialTree, canonicalUrl)
 
   const prefetchCache = new Map<string, PrefetchCacheEntry>()
 
@@ -82,13 +90,7 @@ export function createInitialRouterState({
       hashFragment: null,
       segmentPaths: [],
     },
-    canonicalUrl:
-      // location.href is read as the initial value for canonicalUrl in the browser
-      // This is safe to do as canonicalUrl can't be rendered, it's only used to control the history updates in the useEffect further down in this file.
-      location
-        ? // window.location does not have the same type as URL but has all the fields createHrefFromUrl needs.
-          createHrefFromUrl(location)
-        : initialCanonicalUrl,
+    canonicalUrl,
     nextUrl:
       // the || operator is intentional, the pathname can be an empty string
       (extractPathFromFlightRouterState(initialTree) || location?.pathname) ??
@@ -99,7 +101,10 @@ export function createInitialRouterState({
     // Seed the prefetch cache with this page's data.
     // This is to prevent needlessly re-prefetching a page that is already reusable,
     // and will avoid triggering a loading state/data fetch stall when navigating back to the page.
-    const url = new URL(location.pathname, location.origin)
+    const url = new URL(
+      `${location.pathname}${location.search}`,
+      location.origin
+    )
 
     const initialFlightData: FlightData = [['', initialTree, null, null]]
     createPrefetchCacheEntryForInitialLoad({

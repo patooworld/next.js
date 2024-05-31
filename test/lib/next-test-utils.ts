@@ -192,6 +192,12 @@ export interface NextOptions {
   stdout?: true | 'log'
   ignoreFail?: boolean
 
+  /**
+   * If true, this enables the linting step in the build process. If false or
+   * undefined, it adds a `--no-lint` flag to the build command.
+   */
+  lint?: boolean
+
   onStdout?: (data: any) => void
   onStderr?: (data: any) => void
 }
@@ -442,6 +448,12 @@ export function nextBuild(
   args: string[] = [],
   opts: NextOptions = {}
 ) {
+  // If the build hasn't requested it to be linted explicitly, disable linting
+  // if it's not already disabled.
+  if (!opts.lint && !args.includes('--no-lint')) {
+    args.push('--no-lint')
+  }
+
   return runNextCommand(['build', dir, ...args], opts)
 }
 
@@ -451,6 +463,20 @@ export function nextLint(
   opts: NextOptions = {}
 ) {
   return runNextCommand(['lint', dir, ...args], opts)
+}
+
+export function nextTest(
+  dir: string,
+  args: string[] = [],
+  opts: NextOptions = {}
+) {
+  return runNextCommand(['experimental-test', dir, ...args], {
+    ...opts,
+    env: {
+      JEST_WORKER_ID: undefined, // Playwright complains about being executed by Jest
+      ...opts.env,
+    },
+  })
 }
 
 export function nextStart(
@@ -543,6 +569,23 @@ export async function killApp(
   }
 }
 
+async function startListen(server: http.Server, port?: number) {
+  const listenerPromise = new Promise((resolve) => {
+    server['__socketSet'] = new Set()
+    const listener = server.listen(port, () => {
+      resolve(null)
+    })
+
+    listener.on('connection', function (socket) {
+      server['__socketSet'].add(socket)
+      socket.on('close', () => {
+        server['__socketSet'].delete(socket)
+      })
+    })
+  })
+  await listenerPromise
+}
+
 export async function startApp(app: NextServer) {
   // force require usage instead of dynamic import in jest
   // x-ref: https://github.com/nodejs/node/issues/35889
@@ -556,7 +599,7 @@ export async function startApp(app: NextServer) {
   const server = http.createServer(handler)
   server['__app'] = app
 
-  await promisify(server.listen).apply(server)
+  await startListen(server)
 
   return server
 }
@@ -565,9 +608,22 @@ export async function stopApp(server: http.Server | undefined) {
   if (!server) {
     return
   }
+
   if (server['__app']) {
     await server['__app'].close()
   }
+
+  // Node.js's http::close() prevents new connections from being accepted,
+  // but doesn't close existing connections and if there are any leftover
+  // whole process teardown will wait until it's being closed.
+  // Instead, force close connections since this is teardown fn that we expect
+  // any connections to be closed already.
+  server['__socketSet']?.forEach(function (socket) {
+    if (!socket.closed && !socket.destroyed) {
+      socket.destroy()
+    }
+  })
+
   await promisify(server.close).apply(server)
 }
 
@@ -590,7 +646,7 @@ export async function startStaticServer(
     })
   }
 
-  await promisify(server.listen).call(server, fixedPort)
+  await startListen(server, fixedPort)
   return server
 }
 
@@ -599,7 +655,7 @@ export async function startCleanStaticServer(dir: string) {
   const server = http.createServer(app)
   app.use(express.static(dir, { extensions: ['html'] }))
 
-  await promisify(server.listen).apply(server)
+  await startListen(server)
   return server
 }
 
@@ -753,7 +809,7 @@ export async function hasRedbox(browser: BrowserInterface): Promise<boolean> {
         .call(document.querySelectorAll('nextjs-portal'))
         .find((p) =>
           p.shadowRoot.querySelector(
-            '#nextjs__container_errors_label, #nextjs__container_build_error_label, #nextjs__container_root_layout_error_label'
+            '#nextjs__container_errors_label, #nextjs__container_errors_label'
           )
         )
     )
@@ -811,7 +867,7 @@ export async function getRedboxSource(browser: BrowserInterface) {
           .call(document.querySelectorAll('nextjs-portal'))
           .find((p) =>
             p.shadowRoot.querySelector(
-              '#nextjs__container_errors_label, #nextjs__container_build_error_label, #nextjs__container_root_layout_error_label'
+              '#nextjs__container_errors_label, #nextjs__container_errors_label'
             )
           )
         const root = portal.shadowRoot
@@ -858,7 +914,7 @@ export async function getRedboxDescriptionWarning(browser: BrowserInterface) {
           )
         const root = portal.shadowRoot
         const text = root.querySelector(
-          '#nextjs__container_errors__extra'
+          '#nextjs__container_errors__notes'
         )?.innerText
         return text
       }),

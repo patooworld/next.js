@@ -34,6 +34,9 @@ export async function createApp({
   appRouter,
   srcDir,
   importAlias,
+  skipInstall,
+  empty,
+  turbo,
 }: {
   appPath: string
   packageManager: PackageManager
@@ -45,16 +48,13 @@ export async function createApp({
   appRouter: boolean
   srcDir: boolean
   importAlias: string
+  skipInstall: boolean
+  empty: boolean
+  turbo: boolean
 }): Promise<void> {
   let repoInfo: RepoInfo | undefined
   const mode: TemplateMode = typescript ? 'ts' : 'js'
-  const template: TemplateType = appRouter
-    ? tailwind
-      ? 'app-tw'
-      : 'app'
-    : tailwind
-    ? 'default-tw'
-    : 'default'
+  const template: TemplateType = `${appRouter ? 'app' : 'default'}${tailwind ? '-tw' : ''}${empty ? '-empty' : ''}`
 
   if (example) {
     let repoUrl: URL | undefined
@@ -207,7 +207,7 @@ export async function createApp({
     }
 
     hasPackageJson = fs.existsSync(packageJsonPath)
-    if (hasPackageJson) {
+    if (!skipInstall && hasPackageJson) {
       console.log('Installing packages. This might take a couple of minutes.')
       console.log()
 
@@ -230,6 +230,8 @@ export async function createApp({
       eslint,
       srcDir,
       importAlias,
+      skipInstall,
+      turbo,
     })
   }
 

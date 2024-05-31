@@ -1,6 +1,6 @@
 import path from 'path'
 import { createNext, FileRef } from 'e2e-utils'
-import { NextInstance } from 'test/lib/next-modes/base'
+import { NextInstance } from 'e2e-utils'
 import { check } from 'next-test-utils'
 import stripAnsi from 'strip-ansi'
 ;(process.env.TURBOPACK ? describe.skip : describe)(
@@ -74,8 +74,8 @@ import stripAnsi from 'strip-ansi'
                 ),
               },
               dependencies: {
-                react: 'latest',
-                'react-dom': 'latest',
+                react: '19.0.0-rc-f994737d14-20240522',
+                'react-dom': '19.0.0-rc-f994737d14-20240522',
               },
             })
           })
@@ -128,8 +128,8 @@ import stripAnsi from 'strip-ansi'
                 ),
               },
               dependencies: {
-                react: 'latest',
-                'react-dom': 'latest',
+                react: '19.0.0-rc-f994737d14-20240522',
+                'react-dom': '19.0.0-rc-f994737d14-20240522',
               },
             })
           })
@@ -237,8 +237,8 @@ import stripAnsi from 'strip-ansi'
               ),
             },
             dependencies: {
-              react: 'latest',
-              'react-dom': 'latest',
+              react: '19.0.0-rc-f994737d14-20240522',
+              'react-dom': '19.0.0-rc-f994737d14-20240522',
             },
           })
 

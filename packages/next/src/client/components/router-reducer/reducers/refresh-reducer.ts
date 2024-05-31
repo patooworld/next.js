@@ -74,7 +74,7 @@ export function refreshReducer(
           [''],
           currentTree,
           treePatch,
-          location.pathname
+          state.canonicalUrl
         )
 
         if (newTree === null) {
@@ -126,7 +126,6 @@ export function refreshReducer(
 
         mutable.cache = cache
         mutable.patchedTree = newTree
-        mutable.canonicalUrl = href
 
         currentTree = newTree
       }

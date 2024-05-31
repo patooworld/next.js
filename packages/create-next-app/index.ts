@@ -86,10 +86,24 @@ const program = new Commander.Command(packageJson.name)
 `
   )
   .option(
+    '--turbo',
+    `
+    
+  Enable Turbopack by default for development.
+`
+  )
+  .option(
     '--import-alias <alias-to-configure>',
     `
 
   Specify import alias to use (default "@/*").
+`
+  )
+  .option(
+    '--empty',
+    `
+
+  Initialize an empty project.
 `
   )
   .option(
@@ -146,18 +160,25 @@ const program = new Commander.Command(packageJson.name)
   Explicitly tell the CLI to reset any stored preferences
 `
   )
+  .option(
+    '--skip-install',
+    `
+
+  Explicitly tell the CLI to skip installing packages
+`
+  )
   .allowUnknownOption()
   .parse(process.argv)
 
 const packageManager = !!program.useNpm
   ? 'npm'
   : !!program.usePnpm
-  ? 'pnpm'
-  : !!program.useYarn
-  ? 'yarn'
-  : !!program.useBun
-  ? 'bun'
-  : getPkgManager()
+    ? 'pnpm'
+    : !!program.useYarn
+      ? 'yarn'
+      : !!program.useBun
+        ? 'bun'
+        : getPkgManager()
 
 async function run(): Promise<void> {
   const conf = new Conf({ projectName: 'create-next-app' })
@@ -257,6 +278,8 @@ async function run(): Promise<void> {
       srcDir: false,
       importAlias: '@/*',
       customizeImportAlias: false,
+      empty: false,
+      turbo: false,
     }
     const getPrefOrDefault = (field: string) =>
       preferences[field] ?? defaults[field]
@@ -353,7 +376,7 @@ async function run(): Promise<void> {
           onState: onPromptState,
           type: 'toggle',
           name: 'srcDir',
-          message: `Would you like to use ${styledSrcDir}?`,
+          message: `Would you like your code inside a ${styledSrcDir}?`,
           initial: getPrefOrDefault('srcDir'),
           active: 'Yes',
           inactive: 'No',
@@ -381,6 +404,25 @@ async function run(): Promise<void> {
       }
     }
 
+    if (!program.turbo && !process.argv.includes('--no-turbo')) {
+      if (ciInfo.isCI) {
+        program.turbo = getPrefOrDefault('turbo')
+      } else {
+        const styledTurbo = blue('Turbopack')
+        const { turbo } = await prompts({
+          onState: onPromptState,
+          type: 'toggle',
+          name: 'turbo',
+          message: `Would you like to use ${styledTurbo} for ${`next dev`}?`,
+          initial: getPrefOrDefault('turbo'),
+          active: 'Yes',
+          inactive: 'No',
+        })
+        program.turbo = Boolean(turbo)
+        preferences.turbo = Boolean(turbo)
+      }
+    }
+
     const importAliasPattern = /^[^*"]+\/\*\s*$/
     if (
       typeof program.importAlias !== 'string' ||
@@ -398,7 +440,7 @@ async function run(): Promise<void> {
           onState: onPromptState,
           type: 'toggle',
           name: 'customizeImportAlias',
-          message: `Would you like to customize the default ${styledImportAlias} (${defaults.importAlias})?`,
+          message: `Would you like to customize the ${styledImportAlias} (${defaults.importAlias} by default)?`,
           initial: getPrefOrDefault('customizeImportAlias'),
           active: 'Yes',
           inactive: 'No',
@@ -438,6 +480,9 @@ async function run(): Promise<void> {
       appRouter: program.app,
       srcDir: program.srcDir,
       importAlias: program.importAlias,
+      skipInstall: program.skipInstall,
+      empty: program.empty,
+      turbo: program.turbo,
     })
   } catch (reason) {
     if (!(reason instanceof DownloadError)) {
@@ -466,6 +511,9 @@ async function run(): Promise<void> {
       appRouter: program.app,
       srcDir: program.srcDir,
       importAlias: program.importAlias,
+      skipInstall: program.skipInstall,
+      empty: program.empty,
+      turbo: program.turbo,
     })
   }
   conf.set('preferences', preferences)
@@ -481,10 +529,10 @@ async function notifyUpdate(): Promise<void> {
         packageManager === 'yarn'
           ? 'yarn global add create-next-app'
           : packageManager === 'pnpm'
-          ? 'pnpm add -g create-next-app'
-          : packageManager === 'bun'
-          ? 'bun add -g create-next-app'
-          : 'npm i -g create-next-app'
+            ? 'pnpm add -g create-next-app'
+            : packageManager === 'bun'
+              ? 'bun add -g create-next-app'
+              : 'npm i -g create-next-app'
 
       console.log(
         yellow(bold('A new version of `create-next-app` is available!')) +

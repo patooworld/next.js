@@ -1,4 +1,3 @@
-import type { IncomingMessage, ServerResponse } from 'http'
 import type {
   ActionResult,
   DynamicParamTypesShort,
@@ -16,8 +15,10 @@ import type { LoaderTree } from '../lib/app-dir-module'
 import type { AppPageModule } from '../future/route-modules/app-page/module'
 import type { ClientReferenceManifest } from '../../build/webpack/plugins/flight-manifest-plugin'
 import type { Revalidate } from '../lib/revalidate'
+import type { DeepReadonly } from '../../shared/lib/deep-readonly'
+import type { BaseNextRequest, BaseNextResponse } from '../base-http'
 
-import React from 'react'
+import React, { type JSX } from 'react'
 
 import RenderResult, {
   type AppPageRenderResultMetadata,
@@ -75,7 +76,10 @@ import { appendMutableCookies } from '../web/spec-extension/adapters/request-coo
 import { createServerInsertedHTML } from './server-inserted-html'
 import { getRequiredScripts } from './required-scripts'
 import { addPathPrefix } from '../../shared/lib/router/utils/add-path-prefix'
-import { makeGetServerInsertedHTML } from './make-get-server-inserted-html'
+import {
+  getTracedMetadata,
+  makeGetServerInsertedHTML,
+} from './make-get-server-inserted-html'
 import { walkTreeWithFlightRouterState } from './walk-tree-with-flight-router-state'
 import { createComponentTree } from './create-component-tree'
 import { getAssetQueryString } from './get-asset-query-string'
@@ -107,6 +111,8 @@ import {
   wrapClientComponentLoader,
 } from '../client-component-renderer-logger'
 import { createServerModuleMap } from './action-utils'
+import { isNodeNextRequest } from '../base-http/helpers'
+import { parseParameter } from '../../shared/lib/router/utils/route-regex'
 
 export type GetDynamicParamFromSegment = (
   // [slug] / [[slug]] / [...slug]
@@ -137,12 +143,13 @@ export type AppRenderContext = AppRenderBaseContext & {
   requestId: string
   defaultRevalidate: Revalidate
   pagePath: string
-  clientReferenceManifest: ClientReferenceManifest
+  clientReferenceManifest: DeepReadonly<ClientReferenceManifest>
   assetPrefix: string
   flightDataRendererErrorHandler: ErrorHandler
   serverComponentsErrorHandler: ErrorHandler
   isNotFoundPath: boolean
-  res: ServerResponse
+  nonce: string | undefined
+  res: BaseNextResponse
 }
 
 function createNotFoundLoaderTree(loaderTree: LoaderTree): LoaderTree {
@@ -205,6 +212,7 @@ export type CreateSegmentPath = (child: FlightSegmentPath) => FlightSegmentPath
  */
 function makeGetDynamicParamFromSegment(
   params: { [key: string]: any },
+  pagePath: string,
   flightRouterState: FlightRouterState | undefined
 ): GetDynamicParamFromSegment {
   return function getDynamicParamFromSegment(
@@ -232,17 +240,45 @@ function makeGetDynamicParamFromSegment(
     }
 
     if (!value) {
-      // Handle case where optional catchall does not have a value, e.g. `/dashboard/[...slug]` when requesting `/dashboard`
-      if (segmentParam.type === 'optional-catchall') {
-        const type = dynamicParamTypes[segmentParam.type]
+      const isCatchall = segmentParam.type === 'catchall'
+      const isOptionalCatchall = segmentParam.type === 'optional-catchall'
+
+      if (isCatchall || isOptionalCatchall) {
+        const dynamicParamType = dynamicParamTypes[segmentParam.type]
+        // handle the case where an optional catchall does not have a value,
+        // e.g. `/dashboard/[[...slug]]` when requesting `/dashboard`
+        if (isOptionalCatchall) {
+          return {
+            param: key,
+            value: null,
+            type: dynamicParamType,
+            treeSegment: [key, '', dynamicParamType],
+          }
+        }
+
+        // handle the case where a catchall or optional catchall does not have a value,
+        // e.g. `/foo/bar/hello` and `@slot/[...catchall]` or `@slot/[[...catchall]]` is matched
+        value = pagePath
+          .split('/')
+          // remove the first empty string
+          .slice(1)
+          // replace any dynamic params with the actual values
+          .flatMap((pathSegment) => {
+            const param = parseParameter(pathSegment)
+            // if the segment matches a param, return the param value
+            // otherwise, it's a static segment, so just return that
+            return params[param.key] ?? param.key
+          })
+
         return {
           param: key,
-          value: null,
-          type: type,
+          value,
+          type: dynamicParamType,
           // This value always has to be a string.
-          treeSegment: [key, '', type],
+          treeSegment: [key, value.join('/'), dynamicParamType],
         }
       }
+
       return findDynamicParamFromRouterState(flightRouterState, segment)
     }
 
@@ -330,6 +366,7 @@ async function generateFlight(
     ctx.clientReferenceManifest.clientModules,
     {
       onError: ctx.flightDataRendererErrorHandler,
+      nonce: ctx.nonce,
     }
   )
 
@@ -457,9 +494,10 @@ async function ReactServerApp({ tree, ctx, asNotFound }: ReactServerAppProps) {
         couldBeIntercepted={couldBeIntercepted}
         initialHead={
           <>
-            {ctx.res.statusCode > 400 && (
-              <meta name="robots" content="noindex" />
-            )}
+            {typeof ctx.res.statusCode === 'number' &&
+              ctx.res.statusCode > 400 && (
+                <meta name="robots" content="noindex" />
+              )}
             {/* Adding requestId as react key to make metadata remount for each render */}
             <MetadataTree key={ctx.requestId} />
           </>
@@ -513,7 +551,9 @@ async function ReactServerError({
     <>
       {/* Adding requestId as react key to make metadata remount for each render */}
       <MetadataTree key={requestId} />
-      {res.statusCode >= 400 && <meta name="robots" content="noindex" />}
+      {typeof res.statusCode === 'number' && res.statusCode >= 400 && (
+        <meta name="robots" content="noindex" />
+      )}
       {process.env.NODE_ENV === 'development' && (
         <meta name="next-error" content="not-found" />
       )}
@@ -580,12 +620,13 @@ function ReactServerEntrypoint<T>({
 export type BinaryStreamOf<T> = ReadableStream<Uint8Array>
 
 async function renderToHTMLOrFlightImpl(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: BaseNextRequest,
+  res: BaseNextResponse,
   pagePath: string,
   query: NextParsedUrlQuery,
   renderOpts: RenderOpts,
-  baseCtx: AppRenderBaseContext
+  baseCtx: AppRenderBaseContext,
+  requestEndedState: { ended?: boolean }
 ) {
   const isNotFoundPath = pagePath === '/404'
 
@@ -602,7 +643,7 @@ async function renderToHTMLOrFlightImpl(
     ComponentMod,
     dev,
     nextFontManifest,
-    supportsDynamicHTML,
+    supportsDynamicResponse,
     serverActions,
     appDirDevErrorLogger,
     assetPrefix = '',
@@ -619,8 +660,15 @@ async function renderToHTMLOrFlightImpl(
     globalThis.__next_chunk_load__ = instrumented.loadChunk
   }
 
-  if (typeof req.on === 'function') {
-    req.on('end', () => {
+  if (
+    // The type check here ensures that `req` is correctly typed, and the
+    // environment variable check provides dead code elimination.
+    process.env.NEXT_RUNTIME !== 'edge' &&
+    isNodeNextRequest(req)
+  ) {
+    req.originalRequest.on('end', () => {
+      requestEndedState.ended = true
+
       if ('performance' in globalThis) {
         const metrics = getClientComponentLoaderMetrics({ reset: true })
         if (metrics) {
@@ -664,10 +712,29 @@ async function renderToHTMLOrFlightImpl(
   const isNextExport = !!renderOpts.nextExport
   const { staticGenerationStore, requestStore } = baseCtx
   const { isStaticGeneration } = staticGenerationStore
-  // when static generation fails during PPR, we log the errors separately. We intentionally
-  // silence the error logger in this case to avoid double logging.
-  const silenceStaticGenerationErrors =
-    renderOpts.experimental.ppr && isStaticGeneration
+
+  /**
+   * Sets the headers on the response object. If we're generating static HTML,
+   * we store the headers in the metadata object as well so that they can be
+   * persisted.
+   */
+  const setHeader = isStaticGeneration
+    ? (name: string, value: string | string[]) => {
+        res.setHeader(name, value)
+
+        metadata.headers ??= {}
+        metadata.headers[name] = res.getHeader(name)
+
+        return res
+      }
+    : res.setHeader.bind(res)
+
+  const isRoutePPREnabled = renderOpts.experimental.isRoutePPREnabled === true
+
+  // When static generation fails during PPR, we log the errors separately. We
+  // intentionally silence the error logger in this case to avoid double
+  // logging.
+  const silenceStaticGenerationErrors = isRoutePPREnabled && isStaticGeneration
 
   const serverComponentsErrorHandler = createErrorHandler({
     source: ErrorHandlerSource.serverComponents,
@@ -697,6 +764,10 @@ async function renderToHTMLOrFlightImpl(
 
   ComponentMod.patchFetch()
 
+  if (renderOpts.experimental.after) {
+    ComponentMod.patchCacheScopeSupportIntoReact()
+  }
+
   /**
    * Rules of Static & Dynamic HTML:
    *
@@ -710,7 +781,7 @@ async function renderToHTMLOrFlightImpl(
    * These rules help ensure that other existing features like request caching,
    * coalescing, and ISR continue working as intended.
    */
-  const generateStaticHTML = supportsDynamicHTML !== true
+  const generateStaticHTML = supportsDynamicResponse !== true
 
   // Pull out the hooks/references from the component.
   const { tree: loaderTree, taintObjectReference } = ComponentMod
@@ -745,7 +816,7 @@ async function renderToHTMLOrFlightImpl(
   const shouldProvideFlightRouterState =
     isRSCRequest &&
     (!isPrefetchRSCRequest ||
-      !renderOpts.experimental.ppr ||
+      !isRoutePPREnabled ||
       // Interception routes currently depend on the flight router state to
       // extract dynamic params.
       isInterceptionRouteAppPath(pagePath))
@@ -773,10 +844,20 @@ async function renderToHTMLOrFlightImpl(
 
   const getDynamicParamFromSegment = makeGetDynamicParamFromSegment(
     params,
+    pagePath,
     // `FlightRouterState` is unconditionally provided here because this method uses it
     // to extract dynamic params as a fallback if they're not present in the path.
     parsedFlightRouterState
   )
+
+  // Get the nonce from the incoming request if it has one.
+  const csp =
+    req.headers['content-security-policy'] ||
+    req.headers['content-security-policy-report-only']
+  let nonce: string | undefined
+  if (csp && typeof csp === 'string') {
+    nonce = getScriptNonceFromHeader(csp)
+  }
 
   const ctx: AppRenderContext = {
     ...baseCtx,
@@ -796,6 +877,7 @@ async function renderToHTMLOrFlightImpl(
     flightDataRendererErrorHandler,
     serverComponentsErrorHandler,
     isNotFoundPath,
+    nonce,
     res,
   }
 
@@ -811,15 +893,6 @@ async function renderToHTMLOrFlightImpl(
   const flightDataResolver = isStaticGeneration
     ? createFlightDataResolver(ctx)
     : null
-
-  // Get the nonce from the incoming request if it has one.
-  const csp =
-    req.headers['content-security-policy'] ||
-    req.headers['content-security-policy-report-only']
-  let nonce: string | undefined
-  if (csp && typeof csp === 'string') {
-    nonce = getScriptNonceFromHeader(csp)
-  }
 
   const validateRootLayout = dev
 
@@ -846,6 +919,11 @@ async function renderToHTMLOrFlightImpl(
       tree,
       formState,
     }: RenderToStreamOptions): Promise<RenderToStreamResult> => {
+      const tracingMetadata = getTracedMetadata(
+        getTracer().getTracePropagationData(),
+        renderOpts.experimental.clientTraceMetadata
+      )
+
       const polyfills: JSX.IntrinsicElements['script'][] =
         buildManifest.polyfillFiles
           .filter(
@@ -880,6 +958,7 @@ async function renderToHTMLOrFlightImpl(
         clientReferenceManifest.clientModules,
         {
           onError: serverComponentsErrorHandler,
+          nonce,
         }
       )
 
@@ -906,38 +985,33 @@ async function renderToHTMLOrFlightImpl(
 
       const isResume = !!renderOpts.postponed
 
-      const onHeaders = staticGenerationStore.prerenderState
-        ? // During prerender we write headers to metadata
-          (headers: Headers) => {
-            headers.forEach((value, key) => {
-              metadata.headers ??= {}
-              metadata.headers[key] = value
-            })
-          }
-        : isStaticGeneration || isResume
-        ? // During static generation and during resumes we don't
-          // ask React to emit headers. For Resume this is just not supported
-          // For static generation we know there will be an entire HTML document
-          // output and so moving from tag to header for preloading can only
-          // server to alter preloading priorities in unwanted ways
-          undefined
-        : // During dynamic renders that are not resumes we write
-          // early headers to the response
-          (headers: Headers) => {
-            headers.forEach((value, key) => {
-              res.appendHeader(key, value)
-            })
-          }
+      const onHeaders =
+        // During prerenders, we want to capture the headers created so we can
+        // persist them to the metadata.
+        staticGenerationStore.prerenderState ||
+        // During static generation and during resumes we don't
+        // ask React to emit headers. For Resume this is just not supported
+        // For static generation we know there will be an entire HTML document
+        // output and so moving from tag to header for preloading can only
+        // server to alter preloading priorities in unwanted ways
+        (!isStaticGeneration && !isResume)
+          ? (headers: Headers) => {
+              headers.forEach((value, key) => {
+                setHeader(key, value)
+              })
+            }
+          : undefined
 
       const getServerInsertedHTML = makeGetServerInsertedHTML({
         polyfills,
         renderServerInsertedHTML,
         serverCapturedErrors: allCapturedErrors,
         basePath: renderOpts.basePath,
+        tracingMetadata: tracingMetadata,
       })
 
       const renderer = createStaticRenderer({
-        ppr: renderOpts.experimental.ppr,
+        isRoutePPREnabled,
         isStaticGeneration,
         // If provided, the postpone state should be parsed as JSON so it can be
         // provided to React.
@@ -1042,7 +1116,7 @@ async function renderToHTMLOrFlightImpl(
                 // We postponed but nothing dynamic was used. We resume the render now and immediately abort it
                 // so we can set all the postponed boundaries to client render mode before we store the HTML response
                 const resumeRenderer = createStaticRenderer({
-                  ppr: true,
+                  isRoutePPREnabled,
                   isStaticGeneration: false,
                   postponed: getDynamicHTMLPostponedState(postponed),
                   streamOptions: {
@@ -1076,9 +1150,8 @@ async function renderToHTMLOrFlightImpl(
                   </HeadManagerContext.Provider>
                 )
 
-                const { stream: resumeStream } = await resumeRenderer.render(
-                  resumeChildren
-                )
+                const { stream: resumeStream } =
+                  await resumeRenderer.render(resumeChildren)
                 // First we write everything from the prerender, then we write everything from the aborted resume render
                 renderedHTMLStream = chainStreams(stream, resumeStream)
               }
@@ -1162,17 +1235,11 @@ async function renderToHTMLOrFlightImpl(
         const shouldBailoutToCSR = isBailoutToCSRError(err)
         if (shouldBailoutToCSR) {
           const stack = getStackWithoutErrorMessage(err)
-          if (renderOpts.experimental.missingSuspenseWithCSRBailout) {
-            error(
-              `${err.reason} should be wrapped in a suspense boundary at page "${pagePath}". Read more: https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout\n${stack}`
-            )
-
-            throw err
-          }
-
-          warn(
-            `Entire page "${pagePath}" deopted into client-side rendering due to "${err.reason}". Read more: https://nextjs.org/docs/messages/deopted-into-client-rendering\n${stack}`
+          error(
+            `${err.reason} should be wrapped in a suspense boundary at page "${pagePath}". Read more: https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout\n${stack}`
           )
+
+          throw err
         }
 
         if (isNotFoundError(err)) {
@@ -1188,14 +1255,14 @@ async function renderToHTMLOrFlightImpl(
             // If there were mutable cookies set, we need to set them on the
             // response.
             if (appendMutableCookies(headers, err.mutableCookies)) {
-              res.setHeader('set-cookie', Array.from(headers.values()))
+              setHeader('set-cookie', Array.from(headers.values()))
             }
           }
           const redirectUrl = addPathPrefix(
             getURLFromRedirectError(err),
             renderOpts.basePath
           )
-          res.setHeader('Location', redirectUrl)
+          setHeader('Location', redirectUrl)
         }
 
         const is404 = res.statusCode === 404
@@ -1206,8 +1273,8 @@ async function renderToHTMLOrFlightImpl(
         const errorType = is404
           ? 'not-found'
           : hasRedirectError
-          ? 'redirect'
-          : undefined
+            ? 'redirect'
+            : undefined
 
         const [errorPreinitScripts, errorBootstrapScript] = getRequiredScripts(
           buildManifest,
@@ -1223,6 +1290,7 @@ async function renderToHTMLOrFlightImpl(
           clientReferenceManifest.clientModules,
           {
             onError: serverComponentsErrorHandler,
+            nonce,
           }
         )
 
@@ -1264,6 +1332,7 @@ async function renderToHTMLOrFlightImpl(
                 renderServerInsertedHTML,
                 serverCapturedErrors: [],
                 basePath: renderOpts.basePath,
+                tracingMetadata: tracingMetadata,
               }),
               serverInsertedHTMLToHead: true,
               validateRootLayout,
@@ -1330,9 +1399,12 @@ async function renderToHTMLOrFlightImpl(
 
   // If we have pending revalidates, wait until they are all resolved.
   if (staticGenerationStore.pendingRevalidates) {
-    options.waitUntil = Promise.all(
-      Object.values(staticGenerationStore.pendingRevalidates)
-    )
+    options.waitUntil = Promise.all([
+      staticGenerationStore.incrementalCache?.revalidateTag(
+        staticGenerationStore.revalidatedTags || []
+      ),
+      ...Object.values(staticGenerationStore.pendingRevalidates || {}),
+    ])
   }
 
   addImplicitTags(staticGenerationStore)
@@ -1412,8 +1484,8 @@ async function renderToHTMLOrFlightImpl(
 }
 
 export type AppPageRender = (
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: BaseNextRequest,
+  res: BaseNextResponse,
   pagePath: string,
   query: NextParsedUrlQuery,
   renderOpts: RenderOpts
@@ -1438,14 +1510,23 @@ export const renderToHTMLOrFlight: AppPageRender = (
         {
           urlPathname: pathname,
           renderOpts,
+          requestEndedState: { ended: false },
         },
         (staticGenerationStore) =>
-          renderToHTMLOrFlightImpl(req, res, pagePath, query, renderOpts, {
-            requestStore,
-            staticGenerationStore,
-            componentMod: renderOpts.ComponentMod,
+          renderToHTMLOrFlightImpl(
+            req,
+            res,
+            pagePath,
+            query,
             renderOpts,
-          })
+            {
+              requestStore,
+              staticGenerationStore,
+              componentMod: renderOpts.ComponentMod,
+              renderOpts,
+            },
+            staticGenerationStore.requestEndedState || {}
+          )
       )
   )
 }

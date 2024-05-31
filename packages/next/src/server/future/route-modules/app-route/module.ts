@@ -4,6 +4,7 @@ import type { AppConfig } from '../../../../build/utils'
 import type { NextRequest } from '../../../web/spec-extension/request'
 import type { PrerenderManifest } from '../../../../build'
 import type { NextURL } from '../../../web/next-url'
+import type { DeepReadonly } from '../../../../shared/lib/deep-readonly'
 
 import {
   RouteModule,
@@ -49,6 +50,7 @@ import { getIsServerAction } from '../../../lib/server-action-request-meta'
 import { RequestCookies } from 'next/dist/compiled/@edge-runtime/cookies'
 import { cleanURL } from './helpers/clean-url'
 import { StaticGenBailoutError } from '../../../../client/components/static-generation-bailout'
+import { isStaticGenEnabled } from './helpers/is-static-gen-enabled'
 
 /**
  * The AppRouteModule is the type of the module exported by the bundled App
@@ -63,7 +65,7 @@ export type AppRouteModule =
  */
 export interface AppRouteRouteHandlerContext extends RouteModuleHandleContext {
   renderOpts: StaticGenerationContext['renderOpts']
-  prerenderManifest: PrerenderManifest
+  prerenderManifest: DeepReadonly<PrerenderManifest>
 }
 
 /**
@@ -177,12 +179,16 @@ export class AppRouteRouteModule extends RouteModule<
     // Get the dynamic property from the userland module.
     this.dynamic = this.userland.dynamic
     if (this.nextConfigOutput === 'export') {
-      if (!this.dynamic || this.dynamic === 'auto') {
-        this.dynamic = 'error'
-      } else if (this.dynamic === 'force-dynamic') {
+      if (this.dynamic === 'force-dynamic') {
         throw new Error(
           `export const dynamic = "force-dynamic" on page "${definition.pathname}" cannot be used with "output: export". See more info here: https://nextjs.org/docs/advanced-features/static-html-export`
         )
+      } else if (!isStaticGenEnabled(this.userland) && this.userland['GET']) {
+        throw new Error(
+          `export const dynamic = "force-static"/export const revalidate not configured on route "${definition.pathname}" with "output: export". See more info here: https://nextjs.org/docs/advanced-features/static-html-export`
+        )
+      } else {
+        this.dynamic = 'error'
       }
     }
 
@@ -249,9 +255,12 @@ export class AppRouteRouteModule extends RouteModule<
       req: rawRequest,
     }
 
-    // TODO: types for renderOpts should include previewProps
-    ;(requestContext as any).renderOpts = {
+    requestContext.renderOpts = {
+      // @ts-expect-error TODO: types for renderOpts should include previewProps
       previewProps: context.prerenderManifest.preview,
+      waitUntil: context.renderOpts.waitUntil,
+      onClose: context.renderOpts.onClose,
+      experimental: context.renderOpts.experimental,
     }
 
     // Get the context for the static generation.
@@ -394,11 +403,14 @@ export class AppRouteRouteModule extends RouteModule<
                     context.renderOpts.fetchMetrics =
                       staticGenerationStore.fetchMetrics
 
-                    context.renderOpts.waitUntil = Promise.all(
-                      Object.values(
-                        staticGenerationStore.pendingRevalidates || []
-                      )
-                    )
+                    context.renderOpts.pendingWaitUntil = Promise.all([
+                      staticGenerationStore.incrementalCache?.revalidateTag(
+                        staticGenerationStore.revalidatedTags || []
+                      ),
+                      ...Object.values(
+                        staticGenerationStore.pendingRevalidates || {}
+                      ),
+                    ])
 
                     addImplicitTags(staticGenerationStore)
                     ;(context.renderOpts as any).fetchTags =

@@ -40,6 +40,7 @@ import { ensureLeadingSlash } from '../../shared/lib/page-path/ensure-leading-sl
 import { getNextPathnameInfo } from '../../shared/lib/router/utils/get-next-pathname-info'
 import { getHostname } from '../../shared/lib/get-hostname'
 import { detectDomainLocale } from '../../shared/lib/i18n/detect-domain-locale'
+import { MockedResponse } from './mock-request'
 
 const debug = setupDebug('next:router-server:main')
 const isNextFont = (pathname: string | null) =>
@@ -72,6 +73,7 @@ export async function initialize(opts: {
   customServer?: boolean
   experimentalHttpsServer?: boolean
   startServerSpan?: Span
+  quiet?: boolean
 }): Promise<[WorkerRequestHandler, WorkerUpgradeHandler, NextServer]> {
   if (!process.env.NODE_ENV) {
     // @ts-ignore not readonly
@@ -259,9 +261,8 @@ export async function initialize(opts: {
       debug('invokeRender', req.url, invokeHeaders)
 
       try {
-        const initResult = await renderServer?.instance?.initialize(
-          renderServerOpts
-        )
+        const initResult =
+          await renderServer?.instance?.initialize(renderServerOpts)
         try {
           await initResult?.requestHandler(req, res)
         } catch (err) {
@@ -604,6 +605,7 @@ export async function initialize(opts: {
     experimentalHttpsServer: !!opts.experimentalHttpsServer,
     bundlerService: devBundlerService,
     startServerSpan: opts.startServerSpan,
+    quiet: opts.quiet,
   }
   renderServerOpts.serverFields.routerServerHandler = requestHandlerImpl
 
@@ -659,9 +661,16 @@ export async function initialize(opts: {
         }
       }
 
+      const res = new MockedResponse({
+        resWriter: () => {
+          throw new Error(
+            'Invariant: did not expect response writer to be written to for upgrade request'
+          )
+        },
+      })
       const { matchedOutput, parsedUrl } = await resolveRoutes({
         req,
-        res: socket as any,
+        res,
         isUpgradeReq: true,
         signal: signalFromNodeResponse(socket),
       })
@@ -673,7 +682,7 @@ export async function initialize(opts: {
       }
 
       if (parsedUrl.protocol) {
-        return await proxyRequest(req, socket as any, parsedUrl, head)
+        return await proxyRequest(req, socket, parsedUrl, head)
       }
 
       // If there's no matched output, we don't handle the request as user's

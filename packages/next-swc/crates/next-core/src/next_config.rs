@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
-use turbo_tasks::{trace::TraceRawVcs, Vc};
+use turbo_tasks::{trace::TraceRawVcs, TaskInput, Vc};
 use turbopack_binding::{
     turbo::{tasks_env::EnvMap, tasks_fs::FileSystemPath},
     turbopack::{
@@ -17,11 +17,15 @@ use turbopack_binding::{
             styled_components::StyledComponentsTransformConfig,
         },
         node::transforms::webpack::{WebpackLoaderItem, WebpackLoaderItems},
-        turbopack::module_options::{LoaderRuleItem, OptionWebpackRules},
+        turbopack::module_options::{
+            module_options_context::MdxTransformOptions, LoaderRuleItem, OptionWebpackRules,
+        },
     },
 };
 
-use crate::next_shared::transforms::ModularizeImportPackageConfig;
+use crate::{
+    next_import_map::mdx_import_source_file, next_shared::transforms::ModularizeImportPackageConfig,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,9 +87,19 @@ pub struct NextConfig {
     pub cross_origin: Option<CrossOriginConfig>,
     pub dev_indicators: Option<DevIndicatorsConfig>,
     pub output: Option<OutputType>,
-    pub analytics_id: Option<String>,
 
+    /// Enables the bundling of node_modules packages (externals) for pages
+    /// server-side bundles.
     ///
+    /// [API Reference](https://nextjs.org/docs/pages/api-reference/next-config-js/bundlePagesRouterDependencies)
+    pub bundle_pages_router_dependencies: Option<bool>,
+
+    /// A list of packages that should be treated as external on the server
+    /// build.
+    ///
+    /// [API Reference](https://nextjs.org/docs/app/api-reference/next-config-js/serverExternalPackages)
+    pub server_external_packages: Option<Vec<String>>,
+
     #[serde(rename = "_originalRedirects")]
     pub original_redirects: Option<Vec<Redirect>>,
 
@@ -107,13 +121,11 @@ pub struct NextConfig {
     generate_etags: bool,
     http_agent_options: HttpAgentConfig,
     on_demand_entries: OnDemandEntriesConfig,
-    output_file_tracing: bool,
     powered_by_header: bool,
     production_browser_source_maps: bool,
     public_runtime_config: IndexMap<String, serde_json::Value>,
     server_runtime_config: IndexMap<String, serde_json::Value>,
     static_page_generation_timeout: f64,
-    swc_minify: Option<bool>,
     target: Option<String>,
     typescript: TypeScriptConfig,
     use_file_system_public_routes: bool,
@@ -195,7 +207,19 @@ pub enum OutputType {
     Export,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[derive(
+    Debug,
+    Clone,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    TaskInput,
+    TraceRawVcs,
+    Serialize,
+    Deserialize,
+)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum RouteHas {
     Header {
@@ -395,7 +419,7 @@ pub struct ExperimentalTurboConfig {
     pub use_swc_css: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleConfigItemOptions {
     pub loaders: Vec<LoaderItem>,
@@ -403,26 +427,64 @@ pub struct RuleConfigItemOptions {
     pub rename_as: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs)]
 #[serde(rename_all = "camelCase", untagged)]
 pub enum RuleConfigItemOrShortcut {
     Loaders(Vec<LoaderItem>),
     Advanced(RuleConfigItem),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs)]
 #[serde(rename_all = "camelCase", untagged)]
 pub enum RuleConfigItem {
     Options(RuleConfigItemOptions),
     Conditional(IndexMap<String, RuleConfigItem>),
+    Boolean(bool),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TraceRawVcs)]
 #[serde(untagged)]
 pub enum LoaderItem {
     LoaderName(String),
     LoaderOptions(WebpackLoaderItem),
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[serde(untagged)]
+pub enum MdxRsOptions {
+    Boolean(bool),
+    Option(MdxTransformOptions),
+}
+
+#[turbo_tasks::value(shared)]
+#[derive(Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum ReactCompilerMode {
+    Infer,
+    Annotation,
+    All,
+}
+
+/// Subset of react compiler options
+#[turbo_tasks::value(shared)]
+#[derive(Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactCompilerOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compilation_mode: Option<ReactCompilerMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panic_threshold: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[serde(untagged)]
+pub enum ReactCompilerOptionsOrBoolean {
+    Boolean(bool),
+    Option(ReactCompilerOptions),
+}
+
+#[turbo_tasks::value(transparent)]
+pub struct OptionalReactCompilerOptions(Option<Vc<ReactCompilerOptions>>);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TraceRawVcs)]
 #[serde(rename_all = "camelCase")]
@@ -437,10 +499,7 @@ pub struct ExperimentalConfig {
     pub isr_flush_to_disk: Option<bool>,
     /// For use with `@next/mdx`. Compile MDX files using the new Rust compiler.
     /// @see [api reference](https://nextjs.org/docs/app/api-reference/next-config-js/mdxRs)
-    mdx_rs: Option<bool>,
-    /// A list of packages that should be treated as external in the RSC server
-    /// build. @see [api reference](https://nextjs.org/docs/app/api-reference/next-config-js/server_components_external_packages)
-    pub server_components_external_packages: Option<Vec<String>>,
+    mdx_rs: Option<MdxRsOptions>,
     pub strict_next_head: Option<bool>,
     pub swc_plugins: Option<Vec<(String, serde_json::Value)>>,
     pub turbo: Option<ExperimentalTurboConfig>,
@@ -460,12 +519,14 @@ pub struct ExperimentalConfig {
     pub web_vitals_attribution: Option<Vec<String>>,
     pub server_actions: Option<ServerActionsOrLegacyBool>,
     pub sri: Option<SubResourceIntegrity>,
+    react_compiler: Option<ReactCompilerOptionsOrBoolean>,
 
     // ---
     // UNSUPPORTED
     // ---
     adjust_font_fallbacks: Option<bool>,
     adjust_font_fallbacks_with_size_adjust: Option<bool>,
+    after: Option<bool>,
     amp: Option<serde_json::Value>,
     app_document_preloading: Option<bool>,
     case_sensitive_routes: Option<bool>,
@@ -485,6 +546,7 @@ pub struct ExperimentalConfig {
     gzip_size: Option<bool>,
 
     instrumentation_hook: Option<bool>,
+    client_trace_metadata: Option<Vec<String>>,
     large_page_data_bytes: Option<f64>,
     logging: Option<serde_json::Value>,
     memory_based_workers_count: Option<bool>,
@@ -498,14 +560,13 @@ pub struct ExperimentalConfig {
     output_file_tracing_root: Option<String>,
     /// Using this feature will enable the `react@experimental` for the `app`
     /// directory.
-    ppr: Option<bool>,
+    ppr: Option<ExperimentalPartialPrerendering>,
     taint: Option<bool>,
     proxy_timeout: Option<f64>,
     /// enables the minification of server code.
     server_minification: Option<bool>,
     /// Enables source maps generation for the server production bundle.
     server_source_maps: Option<bool>,
-    swc_minify: Option<bool>,
     swc_trace_profiling: Option<bool>,
     /// @internal Used by the Next.js internals only.
     trust_host_header: Option<bool>,
@@ -518,6 +579,49 @@ pub struct ExperimentalConfig {
     /// (doesn't apply to Turbopack).
     webpack_build_worker: Option<bool>,
     worker_threads: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
+#[serde(rename_all = "lowercase")]
+pub enum ExperimentalPartialPrerenderingIncrementalValue {
+    Incremental,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, TraceRawVcs)]
+#[serde(untagged)]
+pub enum ExperimentalPartialPrerendering {
+    Incremental(ExperimentalPartialPrerenderingIncrementalValue),
+    Boolean(bool),
+}
+
+#[test]
+fn test_parse_experimental_partial_prerendering() {
+    let json = serde_json::json!({
+        "ppr": "incremental"
+    });
+    let config: ExperimentalConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        config.ppr,
+        Some(ExperimentalPartialPrerendering::Incremental(
+            ExperimentalPartialPrerenderingIncrementalValue::Incremental
+        ))
+    );
+
+    let json = serde_json::json!({
+        "ppr": true
+    });
+    let config: ExperimentalConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        config.ppr,
+        Some(ExperimentalPartialPrerendering::Boolean(true))
+    );
+
+    // Expect if we provide a random string, it will fail.
+    let json = serde_json::json!({
+        "ppr": "random"
+    });
+    let config = serde_json::from_value::<ExperimentalConfig>(json);
+    assert!(config.is_err());
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TraceRawVcs)]
@@ -548,6 +652,25 @@ pub enum EsmExternalsValue {
 pub enum EsmExternals {
     Loose(EsmExternalsValue),
     Bool(bool),
+}
+
+// Test for esm externals deserialization.
+#[test]
+fn test_esm_externals_deserialization() {
+    let json = serde_json::json!({
+        "esmExternals": true
+    });
+    let config: ExperimentalConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(config.esm_externals, Some(EsmExternals::Bool(true)));
+
+    let json = serde_json::json!({
+        "esmExternals": "loose"
+    });
+    let config: ExperimentalConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        config.esm_externals,
+        Some(EsmExternals::Loose(EsmExternalsValue::Loose))
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, TraceRawVcs)]
@@ -639,6 +762,9 @@ impl RemoveConsoleConfig {
 #[turbo_tasks::value(transparent)]
 pub struct ResolveExtensions(Option<Vec<String>>);
 
+#[turbo_tasks::value(transparent)]
+pub struct OptionalMdxTransformOptions(Option<Vc<MdxTransformOptions>>);
+
 #[turbo_tasks::value_impl]
 impl NextConfig {
     #[turbo_tasks::function]
@@ -650,11 +776,15 @@ impl NextConfig {
     }
 
     #[turbo_tasks::function]
-    pub async fn server_component_externals(self: Vc<Self>) -> Result<Vc<Vec<String>>> {
+    pub fn bundle_pages_router_dependencies(&self) -> Vc<bool> {
+        Vc::cell(self.bundle_pages_router_dependencies.unwrap_or_default())
+    }
+
+    #[turbo_tasks::function]
+    pub async fn server_external_packages(self: Vc<Self>) -> Result<Vc<Vec<String>>> {
         Ok(Vc::cell(
             self.await?
-                .experimental
-                .server_components_external_packages
+                .server_external_packages
                 .as_ref()
                 .cloned()
                 .unwrap_or_default(),
@@ -737,25 +867,35 @@ impl NextConfig {
                         .collect(),
                 )
             }
+            enum FindRuleResult<'a> {
+                Found(&'a RuleConfigItemOptions),
+                NotFound,
+                Break,
+            }
             fn find_rule<'a>(
                 rule: &'a RuleConfigItem,
                 active_conditions: &HashSet<String>,
-            ) -> Option<&'a RuleConfigItemOptions> {
+            ) -> FindRuleResult<'a> {
                 match rule {
-                    RuleConfigItem::Options(rule) => {
-                        return Some(rule);
-                    }
+                    RuleConfigItem::Options(rule) => FindRuleResult::Found(rule),
                     RuleConfigItem::Conditional(map) => {
                         for (condition, rule) in map.iter() {
                             if condition == "default" || active_conditions.contains(condition) {
-                                if let Some(rule) = find_rule(rule, active_conditions) {
-                                    return Some(rule);
+                                match find_rule(rule, active_conditions) {
+                                    FindRuleResult::Found(rule) => {
+                                        return FindRuleResult::Found(rule);
+                                    }
+                                    FindRuleResult::Break => {
+                                        return FindRuleResult::Break;
+                                    }
+                                    FindRuleResult::NotFound => {}
                                 }
                             }
                         }
+                        FindRuleResult::NotFound
                     }
+                    RuleConfigItem::Boolean(_) => FindRuleResult::Break,
                 }
-                None
             }
             match rule {
                 RuleConfigItemOrShortcut::Loaders(loaders) => {
@@ -768,7 +908,7 @@ impl NextConfig {
                     );
                 }
                 RuleConfigItemOrShortcut::Advanced(rule) => {
-                    if let Some(RuleConfigItemOptions { loaders, rename_as }) =
+                    if let FindRuleResult::Found(RuleConfigItemOptions { loaders, rename_as }) =
                         find_rule(rule, &active_conditions)
                     {
                         rules.insert(
@@ -824,8 +964,57 @@ impl NextConfig {
     }
 
     #[turbo_tasks::function]
-    pub async fn mdx_rs(self: Vc<Self>) -> Result<Vc<bool>> {
-        Ok(Vc::cell(self.await?.experimental.mdx_rs.unwrap_or(false)))
+    pub async fn mdx_rs(self: Vc<Self>) -> Result<Vc<OptionalMdxTransformOptions>> {
+        let options = &self.await?.experimental.mdx_rs;
+
+        let options = match options {
+            Some(MdxRsOptions::Boolean(true)) => OptionalMdxTransformOptions(Some(
+                MdxTransformOptions {
+                    provider_import_source: Some(mdx_import_source_file()),
+                    ..Default::default()
+                }
+                .cell(),
+            )),
+            Some(MdxRsOptions::Option(options)) => OptionalMdxTransformOptions(Some(
+                MdxTransformOptions {
+                    provider_import_source: Some(
+                        options
+                            .provider_import_source
+                            .as_ref()
+                            .map(|s| s.to_string())
+                            .unwrap_or(mdx_import_source_file()),
+                    ),
+                    ..options.clone()
+                }
+                .cell(),
+            )),
+            _ => OptionalMdxTransformOptions(None),
+        };
+
+        Ok(options.cell())
+    }
+
+    #[turbo_tasks::function]
+    pub async fn react_compiler(self: Vc<Self>) -> Result<Vc<OptionalReactCompilerOptions>> {
+        let options = &self.await?.experimental.react_compiler;
+
+        let options = match options {
+            Some(ReactCompilerOptionsOrBoolean::Boolean(true)) => {
+                OptionalReactCompilerOptions(Some(
+                    ReactCompilerOptions {
+                        compilation_mode: None,
+                        panic_threshold: None,
+                    }
+                    .cell(),
+                ))
+            }
+            Some(ReactCompilerOptionsOrBoolean::Option(options)) => OptionalReactCompilerOptions(
+                Some(ReactCompilerOptions { ..options.clone() }.cell()),
+            ),
+            _ => OptionalReactCompilerOptions(None),
+        };
+
+        Ok(options.cell())
     }
 
     #[turbo_tasks::function]
@@ -833,11 +1022,6 @@ impl NextConfig {
         Ok(Vc::cell(
             self.await?.sass_options.clone().unwrap_or_default(),
         ))
-    }
-
-    #[turbo_tasks::function]
-    pub async fn swc_minify(self: Vc<Self>) -> Result<Vc<bool>> {
-        Ok(Vc::cell(self.await?.swc_minify.unwrap_or(false)))
     }
 
     #[turbo_tasks::function]
@@ -864,10 +1048,8 @@ impl NextConfig {
             "{}/_next/",
             if let Some(asset_prefix) = &this.asset_prefix {
                 asset_prefix
-            } else if let Some(base_path) = &this.base_path {
-                base_path
             } else {
-                ""
+                this.base_path.as_ref().map_or("", |b| b.as_str())
             }
             .trim_end_matches('/')
         ))))
@@ -875,7 +1057,19 @@ impl NextConfig {
 
     #[turbo_tasks::function]
     pub async fn enable_ppr(self: Vc<Self>) -> Result<Vc<bool>> {
-        Ok(Vc::cell(self.await?.experimental.ppr.unwrap_or(false)))
+        Ok(Vc::cell(
+            self.await?
+                .experimental
+                .ppr
+                .as_ref()
+                .map(|ppr| match ppr {
+                    ExperimentalPartialPrerendering::Incremental(
+                        ExperimentalPartialPrerenderingIncrementalValue::Incremental,
+                    ) => true,
+                    ExperimentalPartialPrerendering::Boolean(b) => *b,
+                })
+                .unwrap_or(false),
+        ))
     }
 
     #[turbo_tasks::function]
